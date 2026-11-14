@@ -16,5 +16,10 @@ function showCurrentTab() {
   }
 }
 
+let previousWidth = window.innerWidth;
 window.addEventListener("pageshow", showCurrentTab);
-mobileTabs.addEventListener("change", showCurrentTab);
+window.addEventListener("resize", () => {
+  if (window.innerWidth === previousWidth) return;
+  previousWidth = window.innerWidth;
+  showCurrentTab();
+});

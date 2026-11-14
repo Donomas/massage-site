@@ -4,7 +4,7 @@
 
 ## Размещение на GitHub Pages
 
-1. Загрузите все шесть файлов HTML, `styles.css`, `script.js`, `.nojekyll` и папку `assets` в корень выбранной ветки GitHub-репозитория.
+1. Загрузите все шесть файлов HTML, `styles.css`, `script.js`, `navigation.js`, `.nojekyll` и папку `assets` в корень выбранной ветки GitHub-репозитория.
 2. В настройках репозитория откройте **Settings → Pages**. Выберите **Deploy from a branch**, затем ветку (например, `main`) и папку **/(root)**. Сохраните.
 3. Откройте адрес, показанный в Pages, и проверьте меню, фотографии и сценарий записи. Относительные пути работают и по адресу вида `username.github.io/repository/`.
 

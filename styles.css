@@ -130,15 +130,49 @@ h3 { font-size: 15px; font-weight: 730; line-height: 1.3; }
 }
 
 @media (max-width: 760px) {
+  body { padding-bottom: calc(98px + env(safe-area-inset-bottom, 0px)); }
+  html { scroll-padding-bottom: calc(98px + env(safe-area-inset-bottom, 0px)); }
   .frame { width: calc(100% - 32px); }
   .topbar-inner { min-height: 66px; gap: 12px; }
   .brand { font-size: 28px; }
   .brand-mark { width: 38px; height: 38px; flex-shrink: 0; }
   .top-action { display: inline-flex; align-items: center; min-height: 44px; }
   .layout { grid-template-columns: minmax(0, 1fr); gap: 16px; }
-  .nav-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
-  .nav-list a { gap: 7px; min-height: 48px; height: 100%; padding: 8px 9px; font-size: 13px; }
-  .nav-list a span { width: 16px; flex-basis: 16px; font-size: 16px; }
+  .sidebar {
+    position: fixed;
+    z-index: 3;
+    inset: auto 0 0;
+    padding: 6px env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+    border-top: 1px solid var(--line);
+    background: var(--paper);
+    box-shadow: 0 -5px 20px #33211812;
+  }
+  .nav-list {
+    display: flex;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    gap: 4px;
+    padding: 3px 8px 6px;
+    scroll-padding-inline: 8px;
+    overscroll-behavior-x: contain;
+    scrollbar-width: thin;
+    scrollbar-color: #bca38b transparent;
+  }
+  .nav-list li { flex: 1 0 78px; }
+  .nav-list li:nth-child(3) { flex-basis: 96px; }
+  .nav-list a {
+    flex-direction: column;
+    justify-content: center;
+    min-height: 64px;
+    height: 100%;
+    gap: 4px;
+    padding: 6px 4px;
+    background: transparent;
+    text-align: center;
+    font-size: 11px;
+  }
+  .nav-list a span { width: auto; flex: none; font-size: 19px; line-height: 1; }
+  .nav-list a:focus-visible { outline-offset: -2px; }
   .hero {
     grid-template: "copy" auto "photo" auto / minmax(0, 1fr);
     min-height: 0;

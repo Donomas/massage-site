@@ -14,6 +14,7 @@ let editingMedia = [];
 let formDirty = false;
 let mediaBusy = false;
 let deleteId = null;
+let resumeCardAfterLogin = false;
 const previewUrls = new Map();
 const dateFormatter = new Intl.DateTimeFormat("ru-RU", { dateStyle: "long" });
 
@@ -64,6 +65,10 @@ async function request(path, { method = "GET", body, blob = false, timeout = 200
     const data = await response.json();
     if (!response.ok) {
       if (response.status === 401) {
+        if ($("#card-dialog").open) {
+          resumeCardAfterLogin = true;
+          $("#card-dialog").close();
+        }
         setSession("");
         $("#workspace").hidden = true;
         $("#login-panel").hidden = false;
@@ -264,6 +269,10 @@ $("#login-form").addEventListener("submit", (event) => {
     if (!token) return;
     $("#login-panel").hidden = true;
     $("#workspace").hidden = false;
+    if (resumeCardAfterLogin) {
+      resumeCardAfterLogin = false;
+      $("#card-dialog").showModal();
+    }
     if (dirty) setStatus("Вход выполнен. Несохранённые изменения сохранены в этом окне.");
   });
 });

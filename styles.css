@@ -110,6 +110,14 @@ address { margin-top: 16px; color: var(--muted); font-style: normal; }
 .stop-list li span:last-child { color: var(--muted); }
 .directions .directions-note { font-size: 13px; }
 .directions-note a { text-underline-offset: 3px; }
+.news-feed { display: grid; gap: 20px; margin-top: 24px; }
+.news-card { padding: clamp(20px, 3vw, 32px); border: 1px solid var(--line); border-radius: 20px; background: #fff8ed; overflow-wrap: anywhere; scroll-margin-top: 24px; }
+.news-card h2 { margin-block: 12px 16px; font-size: clamp(28px, 3vw, 44px); line-height: 1.08; }
+.news-date { font-size: 14px; color: var(--muted); }
+.news-body { white-space: pre-wrap; font-size: 16px; }
+.news-body p + p { margin-top: 1em; }
+.news-media { display: grid; gap: 12px; margin-top: 20px; }
+.news-media img, .news-media video { display: block; width: 100%; max-height: 560px; object-fit: contain; border-radius: 12px; background: #f2dec2; }
 .channels { margin: 20px 0 0; padding: 0; list-style: none; display: grid; gap: 10px; }
 .channel { display: grid; grid-template-columns: 48px minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 14px; border: 1px solid var(--line); border-radius: 16px; }
 .channel-mark { display: grid; place-items: center; width: 48px; height: 48px; border-radius: 13px; background: #ebd2b3; font-size: 16px; font-weight: 750; }

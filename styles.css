@@ -101,6 +101,15 @@ h3 { font-size: 15px; font-weight: 730; line-height: 1.3; }
 .service-card > p { color: var(--muted); font-size: 16px; }
 .service-card .service-duration { display: inline-block; padding: 5px 12px; border-radius: 20px; background: #f0dabb; color: var(--ink); font-size: 14px; font-weight: 650; }
 address { margin-top: 16px; color: var(--muted); font-style: normal; }
+.directions-block { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--line); }
+.directions h3 { font-size: 18px; }
+.directions address { margin-top: 10px; font-size: 16px; }
+.directions p { font-size: 16px; }
+.stop-list { display: grid; gap: 10px; list-style: none; padding: 0; margin: 14px 0 0; }
+.stop-list li { display: flex; flex-wrap: wrap; gap: 4px 16px; justify-content: space-between; font-size: 16px; }
+.stop-list li span:last-child { color: var(--muted); }
+.directions .directions-note { font-size: 13px; }
+.directions-note a { text-underline-offset: 3px; }
 .channels { margin: 20px 0 0; padding: 0; list-style: none; display: grid; gap: 10px; }
 .channel { display: grid; grid-template-columns: 48px minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 14px; border: 1px solid var(--line); border-radius: 16px; }
 .channel-mark { display: grid; place-items: center; width: 48px; height: 48px; border-radius: 13px; background: #ebd2b3; font-size: 16px; font-weight: 750; }

@@ -6,23 +6,23 @@
   <meta name="robots" content="noindex, nofollow">
   <meta name="theme-color" content="#fbf3e5">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src https://150-241-115-64.sslip.io; img-src 'self' blob:; media-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'">
-  <title>Редактор новостей — Александр Голованов</title>
+  <title>Редактор разделов — Александр Голованов</title>
   <link rel="icon" href="./assets/mark.svg" type="image/svg+xml">
   <link rel="stylesheet" href="./styles.css?v=7">
-  <link rel="stylesheet" href="./editor.css?v=1">
+  <link rel="stylesheet" href="./editor.css?v=2">
   <script src="./editor-config.js?v=2" defer></script>
-  <script src="./admin.js?v=2" defer></script>
+  <script src="./admin.js?v=3" defer></script>
 </head>
 <body class="editor-page">
   <header class="editor-header">
     <a class="brand" href="./index.html"><span class="brand-mark" aria-hidden="true"></span><span>Массаж<small>Ангарск · частная практика</small></span></a>
-    <a class="text-link" href="./news.html">Открыть ленту</a>
+    <a class="text-link" id="open-section" href="./news.html">Открыть раздел</a>
   </header>
   <main class="editor-main">
-    <div class="editor-heading"><h1>Редактор новостей</h1><p>Карточки с текстом, фотографиями и видео.</p></div>
+    <div class="editor-heading"><h1>Редактор разделов</h1><p>Новости, акции, виды массажа и абонементы.</p></div>
     <section id="setup" class="editor-panel" hidden>
       <h2>Подключение редактора</h2>
-      <p>Для входа и сохранения новостей нужно подключить сервер редактора. Адрес сервера пока не задан.</p>
+      <p>Для входа и сохранения карточек нужно подключить сервер редактора. Адрес сервера пока не задан.</p>
     </section>
     <section id="login-panel" class="editor-panel login-panel" hidden aria-labelledby="login-title">
       <h2 id="login-title">Войти</h2>
@@ -34,20 +34,30 @@
         <button class="button primary" type="submit">Войти в редактор</button>
       </form>
     </section>
-    <section id="workspace" hidden aria-label="Управление новостями">
+    <section id="workspace" hidden aria-label="Управление разделами">
+      <div class="section-selector">
+        <label for="editor-section">Раздел сайта</label>
+        <select id="editor-section">
+          <option value="news">Лента новостей</option>
+          <option value="offers">Акции</option>
+          <option value="services">Виды массажа</option>
+          <option value="programs">Программы и абонементы</option>
+        </select>
+        <p id="section-help">Редактируйте карточки выбранного раздела.</p>
+      </div>
       <div class="editor-toolbar">
-        <button class="button primary" type="button" id="add-card">Добавить новость</button>
+        <button class="button primary" type="button" id="add-card">Добавить карточку</button>
         <div class="editor-actions">
           <button class="button editor-secondary" type="button" id="save-draft">Сохранить черновик</button>
-          <button class="button editor-dark" type="button" id="publish">Опубликовать</button>
+          <button class="button editor-dark" type="button" id="publish">Опубликовать раздел</button>
           <button class="button editor-quiet" type="button" id="logout">Выйти</button>
         </div>
       </div>
       <p id="save-state">Черновик загружается.</p>
-      <p class="editor-help">Порядок карточек здесь станет порядком записей в ленте. Изменения появятся на сайте после публикации.</p>
+      <p class="editor-help">Изменения и порядок карточек применяются к выбранному разделу. Они появятся на сайте после публикации.</p>
       <p id="publication-setup" class="editor-help" hidden>Сохранение работает. Публикация станет доступна после подключения редактора к GitHub.</p>
       <div id="cards" class="editor-cards"></div>
-      <p id="empty" class="editor-empty" hidden>Пока нет карточек. Добавьте первую новость.</p>
+      <p id="empty" class="editor-empty" hidden>Пока нет карточек. Добавьте первую.</p>
       <div id="published-result" class="editor-panel" hidden></div>
     </section>
     <p id="editor-status" role="status" aria-live="polite"></p>
@@ -57,12 +67,18 @@
     <form id="card-form">
       <div class="dialog-heading"><h2 id="card-dialog-title">Новая карточка</h2><button id="close-card" class="button editor-quiet" type="button">Закрыть</button></div>
       <label for="card-title">Заголовок</label>
-      <input id="card-title" required maxlength="160" placeholder="О чём ваша новость">
-      <label for="card-date">Дата публикации</label>
-      <input id="card-date" type="date" required>
-      <p class="field-help">Дата отображается на карточке. Запись публикуется сразу после нажатия «Опубликовать».</p>
+      <input id="card-title" required maxlength="160" placeholder="Название карточки">
+      <div id="card-date-field" class="editor-field">
+        <label for="card-date">Дата публикации</label>
+        <input id="card-date" type="date" required>
+        <p class="field-help">Дата отображается на карточке. Запись публикуется сразу после нажатия «Опубликовать раздел».</p>
+      </div>
+      <div id="card-duration-field" class="editor-field" hidden>
+        <label for="card-duration">Длительность</label>
+        <input id="card-duration" maxlength="80" placeholder="Например, 40–60 минут">
+      </div>
       <label for="card-text">Текст</label>
-      <textarea id="card-text" rows="7" maxlength="10000" placeholder="Текст новости"></textarea>
+      <textarea id="card-text" rows="7" maxlength="10000" placeholder="Описание, состав услуги или текст публикации"></textarea>
       <label for="card-media">Медиавложения</label>
       <input id="card-media" type="file" multiple accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm">
       <p class="field-help">До 5 файлов. Фото JPG, PNG, WebP, GIF или видео MP4, WebM. До 20 МБ на файл.</p>

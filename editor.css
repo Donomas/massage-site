@@ -11,7 +11,11 @@
 .login-panel { max-width: 440px; }
 .editor-page form { display: grid; gap: 10px; }
 .editor-page label { font-size: 14px; font-weight: 700; margin-top: 8px; }
-.editor-page input, .editor-page textarea { width: 100%; min-width: 0; padding: 11px; border: 1px solid #bca38b; border-radius: 10px; background: var(--paper); color: var(--ink); font: inherit; }
+.editor-page input, .editor-page textarea, .editor-page select { width: 100%; min-width: 0; padding: 11px; border: 1px solid #bca38b; border-radius: 10px; background: var(--paper); color: var(--ink); font: inherit; }
+.editor-page select { appearance: none; background-image: linear-gradient(45deg, transparent 50%, var(--ink) 50%), linear-gradient(135deg, var(--ink) 50%, transparent 50%); background-position: calc(100% - 20px) 50%, calc(100% - 15px) 50%; background-size: 5px 5px; background-repeat: no-repeat; padding-right: 32px; }
+.section-selector { display: grid; gap: 8px; margin-bottom: 24px; max-width: 560px; }
+.section-selector p { color: var(--muted); font-size: 14px; }
+.editor-field { display: grid; gap: 10px; }
 .editor-page textarea { resize: vertical; min-height: 120px; }
 .editor-page input[type=file] { font-size: 14px; padding: 8px; }
 .editor-page button { font-family: inherit; }

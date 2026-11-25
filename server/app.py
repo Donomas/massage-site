@@ -26,7 +26,7 @@ import tempfile
 import threading
 import time
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 from urllib.request import Request, urlopen
 import uuid
 import xml.etree.ElementTree as ET
@@ -45,6 +45,20 @@ MIME = {
 START = "<!-- NEWS:START -->"
 END = "<!-- NEWS:END -->"
 SITEMAP_NS = "http://www.sitemaps.org/schemas/sitemap/0.9"
+SECTIONS = {"news", "offers", "services", "programs"}
+
+
+def require_section(section="news"):
+    if not isinstance(section, str) or section not in SECTIONS:
+        raise APIError(400, "invalid_section", "Неизвестный раздел редактора.")
+    return section
+
+
+def query_section(query):
+    values = parse_qs(query, keep_blank_values=True).get("section", ["news"])
+    if len(values) != 1:
+        raise APIError(400, "invalid_section", "Укажите один раздел редактора.")
+    return require_section(values[0])
 
 
 class APIError(Exception):
@@ -114,16 +128,26 @@ class Store:
         with self.connection() as db:
             db.executescript("""
                 PRAGMA journal_mode=WAL;
+                BEGIN IMMEDIATE;
                 CREATE TABLE IF NOT EXISTS state (
                     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
                     cards TEXT NOT NULL DEFAULT '[]', revision INTEGER NOT NULL DEFAULT 0,
                     published_commit TEXT, published_url TEXT, published_revision INTEGER
                 );
                 INSERT OR IGNORE INTO state(singleton) VALUES(1);
+                CREATE TABLE IF NOT EXISTS section_state (
+                    section TEXT PRIMARY KEY,
+                    cards TEXT NOT NULL DEFAULT '[]', revision INTEGER NOT NULL DEFAULT 0,
+                    published_commit TEXT, published_url TEXT, published_revision INTEGER
+                );
+                INSERT OR IGNORE INTO section_state
+                    SELECT 'news',cards,revision,published_commit,published_url,published_revision
+                    FROM state WHERE singleton=1;
                 CREATE TABLE IF NOT EXISTS media (
                     id TEXT PRIMARY KEY, extension TEXT NOT NULL,
                     kind TEXT NOT NULL, name TEXT NOT NULL
                 );
+                COMMIT;
             """)
 
     @contextmanager
@@ -136,16 +160,31 @@ class Store:
         finally:
             db.close()
 
-    def draft(self):
+    def seed_section(self, section, cards):
+        section = require_section(section)
         with self.connection() as db:
-            state = db.execute("SELECT cards, revision FROM state WHERE singleton=1").fetchone()
+            if db.execute("SELECT 1 FROM section_state WHERE section=?", (section,)).fetchone():
+                return False
+        cards = self.validate_cards(cards, section)
+        with self.connection() as db:
+            result = db.execute("INSERT OR IGNORE INTO section_state(section,cards) VALUES(?,?)",
+                                (section, json.dumps(cards, ensure_ascii=False)))
+        return result.rowcount == 1
+
+    def draft(self, section="news"):
+        section = require_section(section)
+        self.seed_section(section, [])
+        with self.connection() as db:
+            state = db.execute("SELECT cards, revision FROM section_state WHERE section=?", (section,)).fetchone()
         return {"cards": json.loads(state["cards"]), "revision": state["revision"]}
 
-    def save(self, cards, revision):
+    def save(self, cards, revision, section="news"):
+        section = require_section(section)
+        self.seed_section(section, [])
         with self.connection() as db:
             result = db.execute(
-                "UPDATE state SET cards=?,revision=revision+1 WHERE singleton=1 AND revision=?",
-                (json.dumps(cards, ensure_ascii=False), revision),
+                "UPDATE section_state SET cards=?,revision=revision+1 WHERE section=? AND revision=?",
+                (json.dumps(cards, ensure_ascii=False), section, revision),
             )
             if result.rowcount != 1:
                 raise APIError(409, "stale_revision", "Черновик изменён. Обновите страницу и повторите сохранение.")
@@ -191,14 +230,19 @@ class Store:
                 raise
         return {"id": media_id, "url": f"/media/{filename}", "kind": kind, "name": name}
 
-    def validate_cards(self, cards):
+    def validate_cards(self, cards, section="news"):
+        section = require_section(section)
         if not isinstance(cards, list) or len(cards) > 50:
             raise APIError(400, "invalid_cards", "Допускается не больше 50 карточек.")
         result = []
         card_ids = set()
         for card in cards:
-            if not isinstance(card, dict) or set(card) != {"id", "title", "text", "date", "media"}:
+            required = {"id", "title", "text", "date", "media"}
+            optional = {"duration"} if section == "services" else set()
+            if not isinstance(card, dict) or not required <= card.keys() or card.keys() - required - optional:
                 raise APIError(400, "invalid_card", "Неверные поля карточки.")
+            if "duration" in card and (not isinstance(card["duration"], str) or len(card["duration"]) > 80):
+                raise APIError(400, "invalid_duration", "Длительность должна быть строкой до 80 символов.")
             card_id = card["id"]
             if not isinstance(card_id, str) or not CARD_ID.fullmatch(card_id) or card_id in card_ids:
                 raise APIError(400, "invalid_card_id", "Карточкам нужны разные буквенно-цифровые ID.")
@@ -232,25 +276,33 @@ class Store:
             result.append({**card, "title": card["title"].strip(), "media": files})
         return result
 
-    def mark_published(self, commit, url, revision):
+    def mark_published(self, commit, url, revision, section="news"):
+        section = require_section(section)
+        self.seed_section(section, [])
         with self.connection() as db:
-            db.execute("UPDATE state SET published_commit=?,published_url=?,published_revision=? WHERE singleton=1",
-                       (commit, url, revision))
+            db.execute("UPDATE section_state SET published_commit=?,published_url=?,published_revision=? WHERE section=?",
+                       (commit, url, revision, section))
 
-    def publish_status(self):
+    def publish_status(self, section="news"):
+        section = require_section(section)
+        self.seed_section(section, [])
         with self.connection() as db:
-            row = db.execute("SELECT published_commit,published_url,published_revision FROM state WHERE singleton=1").fetchone()
+            row = db.execute("SELECT published_commit,published_url,published_revision FROM section_state WHERE section=?", (section,)).fetchone()
         return {"commit": row[0], "url": row[1], "revision": row[2], "status": "submitted" if row[0] else "never"}
 
 
-def public_cards(cards):
-    return [{**card, "media": [{**media, "url": f"./assets/news/{media['url'].rsplit('/', 1)[1]}"}
+def public_cards(cards, section="news"):
+    section = require_section(section)
+    return [{**card, "media": [{**media, "url": f"./assets/{section}/{media['url'].rsplit('/', 1)[1]}"}
                               for media in card["media"]]} for card in cards]
 
 
-def render_cards(cards):
+def render_cards(cards, section="news"):
+    section = require_section(section)
     if not cards:
-        return '<section class="section empty-state" aria-label="Публикации"><p>Пока новостей нет.</p></section>'
+        messages = {"news": "Пока новостей нет.", "offers": "Пока акций нет.",
+                    "services": "Услуги пока не опубликованы.", "programs": "Программы пока не опубликованы."}
+        return f'<section class="section empty-state" aria-label="Содержание раздела"><p>{messages[section]}</p></section>'
     rendered = []
     for card in cards:
         published_date = date.fromisoformat(card["date"])
@@ -265,23 +317,70 @@ def render_cards(cards):
                 media_html.append(f'<video src="{url}" controls preload="metadata" playsinline aria-label="{name}">'
                                   f'<a href="{url}">Скачать видео</a></video>')
         media_block = '<div class="news-media">' + "".join(media_html) + '</div>' if media_html else ""
-        rendered.append(f'<article class="news-card" id="news-{escape(card["id"], quote=True)}">'
-                        f'<time class="news-date" datetime="{card["date"]}">{published_date:%d.%m.%Y}</time>'
-                        f'<h2>{escape(card["title"])}</h2><div class="news-body">{paragraphs}</div>{media_block}</article>')
-    return '<div class="news-feed">\n' + "\n".join(rendered) + '\n</div>'
+        card_class = "service-card" if section == "services" else "news-card"
+        article_id = card["id"] if section == "services" else section + "-" + card["id"]
+        date_html = (f'<time class="news-date" datetime="{card["date"]}">{published_date:%d.%m.%Y}</time>'
+                     if section in ("news", "offers") else "")
+        duration_html = (f'<p class="service-duration">{escape(card["duration"])}</p>'
+                         if section == "services" and card.get("duration") else "")
+        rendered.append(f'<article class="{card_class}" id="{escape(article_id, quote=True)}">'
+                        f'{date_html}{duration_html}<h2>{escape(card["title"])}</h2>'
+                        f'<div class="news-body">{paragraphs}</div>{media_block}</article>')
+    wrapper = "service-grid" if section == "services" else "news-feed"
+    return f'<div class="{wrapper}">\n' + "\n".join(rendered) + '\n</div>'
 
 
-def prepare_page(template, cards):
-    if template.count(START) != 1 or template.count(END) != 1 or template.index(START) > template.index(END):
-        raise APIError(502, "invalid_template", "В news.html отсутствуют единственные маркеры NEWS:START и NEWS:END.")
-    before, remainder = template.split(START)
-    _, after = remainder.split(END)
-    result = before + START + "\n" + render_cards(cards) + "\n" + END + after
+def update_service_schema(template, cards):
+    pattern = re.compile(r'(<script\b[^>]*\btype=[\'"]application/ld\+json[\'"][^>]*>)(.*?)(</script\s*>)', re.I | re.S)
+    matches = list(pattern.finditer(template))
+    if len(matches) != 1:
+        raise APIError(502, "invalid_template", "Для услуг нужен один JSON-LD с графом Person и Service.")
+    match = matches[0]
+    try:
+        payload = json.loads(match[2])
+        graph = payload["@graph"]
+        if not isinstance(graph, list) or not all(isinstance(node, dict) for node in graph):
+            raise ValueError
+        person = next(node for node in graph if node.get("@type") == "Person" and node.get("@id"))
+    except (ValueError, KeyError, TypeError, StopIteration):
+        raise APIError(502, "invalid_template", "Для услуг нужен JSON-LD с данными массажиста.") from None
+    service_nodes = [node for node in graph if node.get("@type") == "Service"]
+    area = next((node["areaServed"] for node in service_nodes if "areaServed" in node),
+                {"@type": "City", "name": "Ангарск"})
+    list_name = next((node.get("name") for node in graph if node.get("@type") == "ItemList" and node.get("name")),
+                     "Виды массажа в Ангарске")
+    updated = [node for node in graph if node.get("@type") not in ("Service", "ItemList")]
+    page_url = canonical_url(template)
+    updated.append({"@type": "ItemList", "name": list_name, "itemListElement": [
+        {"@type": "ListItem", "position": index, "item": {"@id": page_url + "#" + card["id"]}}
+        for index, card in enumerate(cards, 1)]})
+    for card in cards:
+        description = card["text"]
+        if card.get("duration"):
+            description = description.rstrip() + " Длительность: " + card["duration"] + "."
+        updated.append({"@type": "Service", "@id": page_url + "#" + card["id"], "name": card["title"],
+                        "description": description, "url": page_url + "#" + card["id"],
+                        "provider": {"@id": person["@id"]}, "areaServed": area})
+    payload["@graph"] = updated
+    encoded = json.dumps(payload, ensure_ascii=False, indent=2).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+    return template[:match.start()] + match[1] + "\n" + encoded + "\n" + match[3] + template[match.end():]
+
+
+def prepare_page(template, cards, section="news"):
+    section = require_section(section)
+    start, end = (START, END) if section == "news" else ("<!-- CONTENT:START -->", "<!-- CONTENT:END -->")
+    if template.count(start) != 1 or template.count(end) != 1 or template.index(start) > template.index(end):
+        raise APIError(502, "invalid_template", f"В {section}.html нужны единственные маркеры {start} и {end}.")
+    before, remainder = template.split(start)
+    _, after = remainder.split(end)
+    result = before + start + "\n" + render_cards(cards, section) + "\n" + end + after
     robots = 'index, follow' if cards else 'noindex'
     result, count = re.subn(r'<meta\s+name=[\'"]robots[\'"]\s+content=[\'"][^\'"]*[\'"]\s*/?>',
                             f'<meta name="robots" content="{robots}">', result, flags=re.I)
     if count != 1:
-        raise APIError(502, "invalid_template", "В news.html нужен один meta robots.")
+        raise APIError(502, "invalid_template", f"В {section}.html нужен один meta robots.")
+    if section == "services":
+        result = update_service_schema(result, cards)
     return result
 
 
@@ -306,31 +405,32 @@ def prepare_sitemap(template, news_url, has_cards):
 def canonical_url(template):
     canonical = re.search(r'<link\s+rel=[\'"]canonical[\'"]\s+href=[\'"]([^\'"]+)[\'"]', template, re.I)
     if not canonical or not canonical[1].startswith("https://"):
-        raise APIError(502, "invalid_template", "В news.html нужен канонический HTTPS-адрес.")
+        raise APIError(502, "invalid_template", "У страницы нужен канонический HTTPS-адрес.")
     return canonical[1]
 
 
-def matches_publication(content, cards, digest):
+def matches_publication(content, cards, digest, section="news"):
     try:
         remote = json.loads(content)
     except (ValueError, TypeError):
         raise APIError(502, "invalid_published_json", "Не удалось проверить опубликованные новости.") from None
     if not isinstance(remote, dict):
         raise APIError(502, "invalid_published_json", "Неверный формат опубликованных новостей.")
-    return remote.get("digest") == digest and remote.get("cards") == cards
+    return remote.get("section", "news") == section and remote.get("digest") == digest and remote.get("cards") == cards
 
 
 def publication_files(store, snapshot, cards, digest, template, sitemap, existing_paths):
+    section = require_section(snapshot.get("section", "news"))
     news_url = canonical_url(template)
     files = {
-        "news.html": prepare_page(template, cards).encode("utf-8"),
+        f"{section}.html": prepare_page(template, cards, section).encode("utf-8"),
         "sitemap.xml": prepare_sitemap(sitemap, news_url, bool(cards)).encode("utf-8"),
-        "content/news.json": json_bytes({"cards": cards, "revision": snapshot["revision"], "digest": digest}),
+        f"content/{section}.json": json_bytes({"cards": cards, "revision": snapshot["revision"], "digest": digest, "section": section}),
     }
     for card in cards:
         for media in card["media"]:
             filename = media["url"].rsplit("/", 1)[1]
-            path = "assets/news/" + filename
+            path = f"assets/{section}/" + filename
             if path not in existing_paths:
                 files[path] = (store.media_dir / filename).read_bytes()
     return files
@@ -371,8 +471,9 @@ class GitHub:
             raise APIError(502, "invalid_template", "Не удалось прочитать файл публикации.") from None
 
     def publish(self, store, snapshot):
-        cards = public_cards(snapshot["cards"])
-        digest = hashlib.sha256(json_bytes(cards)).hexdigest()
+        section = require_section(snapshot.get("section", "news"))
+        cards = public_cards(snapshot["cards"], section)
+        digest = hashlib.sha256(json_bytes({"section": section, "cards": cards})).hexdigest()
         reference = self.request("GET", "/git/ref/heads/" + quote(self.branch, safe="/"))
         head = reference["object"]["sha"]
         commit = self.request("GET", "/git/commits/" + head)
@@ -380,10 +481,11 @@ class GitHub:
         if tree.get("truncated"):
             raise APIError(502, "tree_too_large", "GitHub вернул неполное дерево репозитория.")
         paths = {item["path"] for item in tree["tree"]}
-        template = self.read_file("news.html", head)
+        template = self.read_file(f"{section}.html", head)
         news_url = canonical_url(template)
-        if "content/news.json" in paths:
-            if matches_publication(self.read_file("content/news.json", head), cards, digest):
+        data_path = f"content/{section}.json"
+        if data_path in paths:
+            if matches_publication(self.read_file(data_path, head), cards, digest, section):
                 return {"commit": head, "url": news_url}
         files = publication_files(store, snapshot, cards, digest, template, self.read_file("sitemap.xml", head), paths)
         entries = []
@@ -391,7 +493,7 @@ class GitHub:
             blob = self.request("POST", "/git/blobs", {"content": base64.b64encode(content).decode("ascii"), "encoding": "base64"})
             entries.append({"path": path, "mode": "100644", "type": "blob", "sha": blob["sha"]})
         new_tree = self.request("POST", "/git/trees", {"base_tree": commit["tree"]["sha"], "tree": entries})
-        new_commit = self.request("POST", "/git/commits", {"message": "Publish news", "tree": new_tree["sha"], "parents": [head]})
+        new_commit = self.request("POST", "/git/commits", {"message": f"Publish {section}", "tree": new_tree["sha"], "parents": [head]})
         self.request("PATCH", "/git/refs/heads/" + quote(self.branch, safe="/"), {"sha": new_commit["sha"], "force": False})
         return {"commit": new_commit["sha"], "url": news_url}
 
@@ -420,15 +522,17 @@ class GitSSH:
         return result.stdout
 
     def publish(self, store, snapshot):
+        section = require_section(snapshot.get("section", "news"))
         self.run("fetch", "--no-tags", "origin", f"+refs/heads/{self.branch}:refs/remotes/origin/{self.branch}")
         head = self.run("rev-parse", "refs/remotes/origin/" + self.branch).decode().strip()
         paths = set(self.run("ls-tree", "-r", "--name-only", "-z", head).decode("utf-8").rstrip("\0").split("\0"))
-        template = self.run("show", head + ":news.html").decode("utf-8")
-        cards = public_cards(snapshot["cards"])
-        digest = hashlib.sha256(json_bytes(cards)).hexdigest()
+        template = self.run("show", head + f":{section}.html").decode("utf-8")
+        cards = public_cards(snapshot["cards"], section)
+        digest = hashlib.sha256(json_bytes({"section": section, "cards": cards})).hexdigest()
         news_url = canonical_url(template)
-        if "content/news.json" in paths:
-            if matches_publication(self.run("show", head + ":content/news.json"), cards, digest):
+        data_path = f"content/{section}.json"
+        if data_path in paths:
+            if matches_publication(self.run("show", head + ":" + data_path), cards, digest, section):
                 return {"commit": head, "url": news_url}
         sitemap = self.run("show", head + ":sitemap.xml").decode("utf-8")
         files = publication_files(store, snapshot, cards, digest, template, sitemap, paths)
@@ -439,7 +543,7 @@ class GitSSH:
                 sha = self.run("hash-object", "-w", "--stdin", content=content).decode().strip()
                 self.run("update-index", "--add", "--cacheinfo", f"100644,{sha},{path}", environment=environment)
             tree = self.run("write-tree", environment=environment).decode().strip()
-            commit = self.run("commit-tree", tree, "-p", head, "-m", "Publish news").decode().strip()
+            commit = self.run("commit-tree", tree, "-p", head, "-m", f"Publish {section}").decode().strip()
         # The parent is the fetched remote head. Concurrent branch changes reject this non-force push.
         self.run("push", "--porcelain", "origin", f"{commit}:refs/heads/{self.branch}")
         return {"commit": commit, "url": news_url}
@@ -495,18 +599,20 @@ class Application:
         with self.auth_lock:
             self.sessions.pop(hashlib.sha256(token.encode()).hexdigest(), None)
 
-    def publish(self, revision):
+    def publish(self, revision, section="news"):
+        section = require_section(section)
         if not self.publish_lock.acquire(blocking=False):
             raise APIError(409, "publish_in_progress", "Публикация уже выполняется.")
         try:
-            snapshot = self.store.draft()
+            snapshot = self.store.draft(section)
             if snapshot["revision"] != revision:
                 raise APIError(409, "stale_revision", "Сначала сохраните текущую версию черновика.")
-            snapshot["cards"] = self.store.validate_cards(snapshot["cards"])
+            snapshot["cards"] = self.store.validate_cards(snapshot["cards"], section)
+            snapshot["section"] = section
             if self.github is None:
                 raise APIError(503, "github_not_configured", "Публикация ещё не настроена на сервере.")
             result = self.github.publish(self.store, snapshot)
-            self.store.mark_published(result["commit"], result["url"], revision)
+            self.store.mark_published(result["commit"], result["url"], revision, section)
             return result
         finally:
             self.publish_lock.release()
@@ -599,7 +705,8 @@ def make_handler(application):
         def dispatch(self):
             try:
                 self.check_origin()
-                path = urlsplit(self.path).path
+                route = urlsplit(self.path)
+                path = route.path
                 if self.command == "GET" and path == "/health":
                     return self.respond(200, {"ok": True})
                 if self.command == "POST" and path == "/login":
@@ -609,9 +716,9 @@ def make_handler(application):
                 if not application.authenticated(authorization):
                     raise APIError(401, "unauthorized", "Войдите в редактор.")
                 if self.command == "GET" and path == "/draft":
-                    return self.respond(200, application.store.draft())
+                    return self.respond(200, application.store.draft(query_section(route.query)))
                 if self.command == "GET" and path == "/publish-status":
-                    return self.respond(200, application.store.publish_status())
+                    return self.respond(200, application.store.publish_status(query_section(route.query)))
                 if self.command == "GET" and path.startswith("/media/"):
                     return self.serve_media(path.removeprefix("/media/"))
                 if self.command == "POST" and path == "/logout":
@@ -620,13 +727,15 @@ def make_handler(application):
                 if self.command == "PUT" and path == "/draft":
                     data = self.body()
                     revision = require_revision(data)
-                    cards = application.store.validate_cards(data.get("cards"))
-                    return self.respond(200, application.store.save(cards, revision))
+                    section = require_section(data.get("section", "news"))
+                    cards = application.store.validate_cards(data.get("cards"), section)
+                    return self.respond(200, application.store.save(cards, revision, section))
                 if self.command == "POST" and path == "/upload":
                     data = self.body()
                     return self.respond(201, application.store.upload(data.get("name"), data.get("data")))
                 if self.command == "POST" and path == "/publish":
-                    return self.respond(200, application.publish(require_revision(self.body())))
+                    data = self.body()
+                    return self.respond(200, application.publish(require_revision(data), require_section(data.get("section", "news"))))
                 raise APIError(404, "not_found", "Адрес не найден.")
             except APIError as error:
                 self.respond(error.status, {"error": str(error), "code": error.code})
@@ -713,7 +822,16 @@ def main():
     repository_directory = os.environ.get("NEWS_REPO_DIR")
     github = GitSSH(repository_directory, branch) if repository_directory else GitHub(
         os.environ.get("GITHUB_TOKEN", ""), os.environ.get("GITHUB_REPO", "Donomas/massage-site"), branch)
-    application = Application(Store(data_dir, media_quota_mb * 1024 * 1024), password_hash,
+    store = Store(data_dir, media_quota_mb * 1024 * 1024)
+    for section in sorted(SECTIONS - {"news"}):
+        seed_path = checkout / "content" / f"{section}.json"
+        if seed_path.is_file():
+            try:
+                seed = json.loads(seed_path.read_text(encoding="utf-8"))
+                store.seed_section(section, seed["cards"])
+            except (OSError, ValueError, KeyError, TypeError, APIError):
+                parser.error(f"Не удалось подготовить начальное содержимое раздела {section}.")
+    application = Application(store, password_hash,
                               os.environ.get("NEWS_USERNAME", "admin"), origin, github)
     server = NewsHTTPServer(("127.0.0.1", 8787), make_handler(application))
     print("News API listening on 127.0.0.1:8787", flush=True)

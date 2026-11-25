@@ -3,6 +3,14 @@
 const $ = (selector) => document.querySelector(selector);
 const apiBase = (window.NEWS_EDITOR?.apiUrl || "").replace(/\/$/, "");
 const tokenKey = "massage-news-session";
+const sections = {
+  news: { title: "Лента новостей", page: "news.html", dated: true, help: "Новости с датой, текстом и медиавложениями." },
+  offers: { title: "Акции", page: "offers.html", dated: true, help: "Акции и специальные предложения. Сроки и условия можно указать в тексте." },
+  services: { title: "Виды массажа", page: "services.html", dated: false, help: "Название, длительность и описание массажа. Цены не требуются." },
+  programs: { title: "Программы и абонементы", page: "programs.html", dated: false, help: "Название программы, что в неё входит, текст и медиавложения." }
+};
+const initialSection = new URLSearchParams(window.location.search).get("section");
+let section = Object.hasOwn(sections, initialSection) ? initialSection : "news";
 let token = sessionStorage.getItem(tokenKey) || "";
 let cards = [];
 let revision = 0;
@@ -35,7 +43,20 @@ function setStatus(text) {
 }
 
 function updateSaveState() {
-  $("#save-state").textContent = dirty ? "Есть несохранённые изменения." : "Черновик сохранён.";
+  $("#save-state").textContent = `${sections[section].title} · ${dirty ? "Есть несохранённые изменения." : "Черновик сохранён."}`;
+}
+
+function updateSectionView() {
+  $("#editor-section").value = section;
+  $("#section-help").textContent = sections[section].help;
+  $("#open-section").href = "./" + sections[section].page;
+  $("#card-date-field").hidden = !sections[section].dated;
+  $("#card-date").required = sections[section].dated;
+  $("#card-duration-field").hidden = section !== "services";
+}
+
+function sectionPath(path, selected = section) {
+  return path + "?section=" + encodeURIComponent(selected);
 }
 
 function markDirty() {
@@ -81,7 +102,7 @@ async function request(path, { method = "GET", body, blob = false, timeout = 200
     return data;
   } catch (error) {
     if (error.name === "AbortError") {
-      throw new Error("Сервер не ответил вовремя. При публикации проверьте статус или повторите действие: повторная отправка не создаёт копию новости.");
+      throw new Error("Сервер не ответил вовремя. При публикации проверьте статус или повторите действие: повторная отправка не создаёт копию карточки.");
     }
     if (error instanceof TypeError) throw new Error("Не удалось связаться с сервером. Проверьте подключение к интернету.");
     throw error;
@@ -95,6 +116,7 @@ async function run(action) {
   busy = true;
   setStatus("");
   for (const button of document.querySelectorAll("#workspace button, #login-form button")) button.disabled = true;
+  $("#editor-section").disabled = true;
   try {
     await action();
   } catch (error) {
@@ -103,6 +125,8 @@ async function run(action) {
     busy = false;
     for (const button of document.querySelectorAll(".editor-toolbar button, #login-form button")) button.disabled = false;
     $("#publish").disabled = !window.NEWS_EDITOR?.publicationEnabled;
+    $("#editor-section").disabled = false;
+    updateSectionView();
     if (hasDraft) renderCards();
     else if (apiBase) $("#login-panel").hidden = false;
   }
@@ -165,9 +189,13 @@ function renderCards() {
   $("#empty").hidden = cards.length > 0;
   cards.forEach((card, index) => {
     const article = element("article", undefined, "editor-card");
-    const time = element("time", dateFormatter.format(new Date(card.date + "T12:00:00")));
-    time.dateTime = card.date;
-    article.append(time, element("h2", card.title), element("p", card.text, "card-text"));
+    if (sections[section].dated) {
+      const time = element("time", dateFormatter.format(new Date(card.date + "T12:00:00")));
+      time.dateTime = card.date;
+      article.append(time);
+    }
+    if (section === "services" && card.duration) article.append(element("p", card.duration, "service-duration"));
+    article.append(element("h2", card.title), element("p", card.text, "card-text"));
     for (const media of card.media) article.append(mediaElement(media));
     const actions = element("div", undefined, "editor-actions");
     const edit = actionButton("Редактировать", () => openCard(card));
@@ -217,7 +245,7 @@ function renderMedia() {
 function openCard(card) {
   if (busy) return;
   if (!card && cards.length >= 50) {
-    setStatus("В ленте можно сохранить до 50 карточек.");
+    setStatus("В одном разделе можно сохранить до 50 карточек.");
     return;
   }
   editingId = card?.id || null;
@@ -226,6 +254,7 @@ function openCard(card) {
   $("#card-title").value = card?.title || "";
   $("#card-date").value = card?.date || localDate();
   $("#card-text").value = card?.text || "";
+  $("#card-duration").value = card?.duration || "";
   $("#card-media").value = "";
   $("#card-status").textContent = "";
   formDirty = false;
@@ -240,18 +269,20 @@ function closeCard() {
   $("#card-dialog").close();
 }
 
-async function loadDraft() {
-  const data = await request("/draft");
+async function loadDraft(selected = section) {
+  const data = await request(sectionPath("/draft", selected));
+  section = selected;
   cards = data.cards;
   revision = data.revision;
   hasDraft = true;
   dirty = false;
+  updateSectionView();
   renderCards();
   updateSaveState();
 }
 
 async function saveDraft() {
-  const result = await request("/draft", { method: "PUT", body: { cards, revision } });
+  const result = await request("/draft", { method: "PUT", body: { cards, revision, section } });
   revision = result.revision;
   dirty = false;
   updateSaveState();
@@ -278,6 +309,24 @@ $("#login-form").addEventListener("submit", (event) => {
 });
 
 $("#add-card").addEventListener("click", () => openCard());
+$("#editor-section").addEventListener("change", (event) => {
+  const selected = event.target.value;
+  if (busy || mediaBusy || $("#card-dialog").open || $("#delete-dialog").open) {
+    event.target.value = section;
+    return;
+  }
+  if (dirty && !window.confirm("Переключиться в другой раздел без сохранения изменений?")) {
+    event.target.value = section;
+    return;
+  }
+  run(async () => {
+    await loadDraft(selected);
+    $("#published-result").hidden = true;
+    const url = new URL(window.location.href);
+    url.searchParams.set("section", section);
+    window.history.replaceState(null, "", url);
+  });
+});
 $("#close-card").addEventListener("click", closeCard);
 $("#card-dialog").addEventListener("cancel", (event) => { event.preventDefault(); closeCard(); });
 $("#card-form").addEventListener("input", () => { formDirty = true; });
@@ -295,6 +344,7 @@ $("#card-form").addEventListener("submit", (event) => {
     return;
   }
   const card = { id: editingId || crypto.randomUUID(), title, text, date: $("#card-date").value, media: structuredClone(editingMedia) };
+  if (section === "services") card.duration = $("#card-duration").value.trim();
   if (editingId) cards[cards.findIndex((item) => item.id === editingId)] = card;
   else cards.unshift(card);
   formDirty = false;
@@ -362,20 +412,20 @@ $("#confirm-delete").addEventListener("click", () => {
 });
 $("#save-draft").addEventListener("click", () => run(async () => {
   await saveDraft();
-  setStatus("Черновик сохранён. Публичная лента обновится после публикации.");
+  setStatus("Черновик сохранён. Раздел на сайте обновится после публикации.");
 }));
 $("#publish").addEventListener("click", () => run(async () => {
   if (!window.NEWS_EDITOR?.publicationEnabled) return;
   if (dirty) await saveDraft();
   setStatus("Отправляем изменения в GitHub…");
-  const result = await request("/publish", { method: "POST", body: { revision }, timeout: 180000 });
+  const result = await request("/publish", { method: "POST", body: { revision, section }, timeout: 180000 });
   const output = $("#published-result");
   output.replaceChildren(
     element("h2", "Отправлено в GitHub"),
-    element("p", "GitHub Pages обновит ленту после завершения сборки. Это может занять несколько минут.")
+    element("p", `Раздел «${sections[section].title}» обновится после завершения сборки GitHub Pages. Это может занять несколько минут.`)
   );
-  const link = element("a", "Открыть ленту", "text-link");
-  link.href = "./news.html";
+  const link = element("a", "Открыть раздел", "text-link");
+  link.href = "./" + sections[section].page;
   link.target = "_blank";
   link.rel = "noopener noreferrer";
   output.append(link, element("p", `Коммит ${result.commit?.slice(0, 7) || "создан"}`));
@@ -400,6 +450,7 @@ window.addEventListener("beforeunload", (event) => {
 });
 
 $("#publication-setup").hidden = Boolean(window.NEWS_EDITOR?.publicationEnabled);
+updateSectionView();
 if (!apiBase) {
   $("#setup").hidden = false;
 } else if (!/^https:\/\//.test(apiBase) && !/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(apiBase)) {

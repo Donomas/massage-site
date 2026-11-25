@@ -11,6 +11,8 @@ import threading
 import time
 import unittest
 import subprocess
+import sqlite3
+import re
 from unittest.mock import patch
 
 import app
@@ -26,6 +28,19 @@ SITEMAP = ('<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
            f'<url><loc>{ORIGIN}/massage-site/</loc></url></urlset>')
 
 
+def section_template(section):
+    template = TEMPLATE.replace("news.html", section + ".html").replace("NEWS:", "CONTENT:")
+    if section == "services":
+        schema = {"@context": "https://schema.org", "@graph": [
+            {"@type": "Person", "@id": ORIGIN + "/massage-site/#person", "name": "Александр Голованов"},
+            {"@type": "ItemList", "name": "Виды массажа в Ангарске", "itemListElement": []},
+            {"@type": "Service", "@id": "obsolete-service", "areaServed": {"@type": "City", "name": "Ангарск"}},
+        ]}
+        template = template.replace("</head>", '<script type="application/ld+json" id="services-schema">'
+                                    + json.dumps(schema) + "</script></head>")
+    return template
+
+
 def card(**changes):
     return {"id": "news-1", "title": "Заголовок", "text": "Первая строка\nВторая строка",
             "date": "2026-11-20", "media": [], **changes}
@@ -35,6 +50,8 @@ class FakeGitHub(app.GitHub):
     def __init__(self):
         super().__init__("unused-test-token", "Donomas/massage-site", "main")
         self.files = {"news.html": TEMPLATE.encode(), "sitemap.xml": SITEMAP.encode()}
+        self.files.update({section + ".html": section_template(section).encode()
+                           for section in ("offers", "services", "programs")})
         self.head = "original-commit"
         self.blobs = {}
         self.calls = []
@@ -320,6 +337,134 @@ class HTTPTests(unittest.TestCase):
         self.assertIn("Authorization", headers["Access-Control-Allow-Headers"])
         self.assertNotIn("Access-Control-Allow-Credentials", headers)
 
+    def test_section_api_isolation_and_invalid_section(self):
+        token = self.login()
+        services = [card(id="classic-full", duration="90 минут")]
+        for section in ("offers", "services", "programs"):
+            body = {"cards": services if section == "services" else [card()], "revision": 0, "section": section}
+            self.assertEqual(self.request("PUT", "/draft", body, token)[0], 200)
+            response = self.request("GET", "/draft?section=" + section, token=token)
+            self.assertEqual(response[2]["cards"], body["cards"])
+            self.assertEqual(self.request("GET", "/publish-status?section=" + section, token=token)[2]["status"], "never")
+        self.assertEqual(self.request("GET", "/draft", token=token)[2], {"cards": [], "revision": 0})
+        for section in ("unknown", "", "services&section=news", "../news"):
+            self.assertEqual(self.request("GET", "/draft?section=" + section, token=token)[0], 400)
+        for section in ("unknown", "", None, [], {}):
+            self.assertEqual(self.request("PUT", "/draft", {"cards": [], "revision": 0, "section": section}, token)[0], 400)
+            self.assertEqual(self.request("POST", "/publish", {"revision": 0, "section": section}, token)[0], 400)
+
+
+class SectionTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.directory = Path(self.temp.name)
+        self.store = app.Store(self.directory / "private")
+
+    def test_populated_legacy_database_migrates_once_without_data_loss(self):
+        legacy = self.directory / "legacy"
+        legacy.mkdir()
+        with sqlite3.connect(legacy / "news.sqlite3") as db:
+            db.executescript("""
+                CREATE TABLE state(singleton INTEGER PRIMARY KEY,cards TEXT,revision INTEGER,
+                    published_commit TEXT,published_url TEXT,published_revision INTEGER);
+                CREATE TABLE media(id TEXT PRIMARY KEY,extension TEXT,kind TEXT,name TEXT);
+            """)
+            db.execute("INSERT INTO state VALUES(1,?,?,?,?,?)", (json.dumps([card()]), 7, "legacy-commit", NEWS_URL, 6))
+            db.execute("INSERT INTO media VALUES(?,?,?,?)", ("a" * 32, "png", "image", "legacy.png"))
+        db.close()
+        store = app.Store(legacy)
+        self.assertEqual(store.draft(), {"cards": [card()], "revision": 7})
+        self.assertEqual(store.publish_status()["commit"], "legacy-commit")
+        self.assertEqual(store.media("a" * 32)["name"], "legacy.png")
+        store.save([card(title="Updated")], 7)
+        reopened = app.Store(legacy)
+        self.assertEqual(reopened.draft()["revision"], 8)
+        self.assertEqual(reopened.draft()["cards"][0]["title"], "Updated")
+
+    def test_seed_once_and_independent_revisions_and_status(self):
+        services = [card(id="first", duration="90 минут"), card(id="second", duration="30 минут")]
+        self.assertTrue(self.store.seed_section("services", services))
+        self.assertFalse(self.store.seed_section("services", []))
+        self.store.save([card()], 0)
+        self.store.save([card(title="Акция")], 0, "offers")
+        self.store.save(list(reversed(services)), 0, "services")
+        self.assertEqual(self.store.draft("services")["cards"][0]["id"], "second")
+        self.assertEqual(self.store.draft("offers")["revision"], 1)
+        self.assertEqual(self.store.draft("programs")["revision"], 0)
+        self.store.mark_published("offer-commit", "https://example.test/offers.html", 1, "offers")
+        self.assertEqual(self.store.publish_status("offers")["commit"], "offer-commit")
+        self.assertEqual(self.store.publish_status()["status"], "never")
+
+    def test_duration_is_optional_only_for_services_and_price_is_rejected(self):
+        self.assertEqual(self.store.validate_cards([card()], "services"), [card()])
+        self.assertEqual(self.store.validate_cards([card(duration="40–60 минут")], "services")[0]["duration"], "40–60 минут")
+        for section in ("news", "offers", "programs"):
+            with self.assertRaises(app.APIError):
+                self.store.validate_cards([card(duration="30 минут")], section)
+        for value in (None, 90, "x" * 81):
+            with self.assertRaises(app.APIError):
+                self.store.validate_cards([card(duration=value)], "services")
+        for section in app.SECTIONS:
+            with self.assertRaises(app.APIError):
+                self.store.validate_cards([card(price=100)], section)
+
+    def test_service_render_and_schema_match_visible_cards(self):
+        services = [card(id="classic", duration="90 минут", title="Тест </script><script>bad()</script>"),
+                    card(id="other", duration="30 минут")]
+        rendered = app.prepare_page(section_template("services"), services, "services")
+        self.assertIn('class="service-grid"', rendered)
+        self.assertIn('class="service-card" id="classic"', rendered)
+        self.assertIn('<p class="service-duration">90 минут</p>', rendered)
+        self.assertNotIn("<time", rendered)
+        self.assertNotIn("obsolete-service", rendered)
+        self.assertNotIn("<script>bad()", rendered)
+        match = re.search(r'<script[^>]+id="services-schema">(.*?)</script>', rendered, re.S)
+        graph = json.loads(match[1])["@graph"]
+        self.assertEqual(graph[0]["@type"], "Person")
+        nodes = [node for node in graph if node["@type"] == "Service"]
+        page = NEWS_URL.replace("news.html", "services.html")
+        self.assertEqual([node["@id"] for node in nodes], [page + "#classic", page + "#other"])
+        self.assertIn("90 минут", nodes[0]["description"])
+        removed = app.prepare_page(rendered, [], "services")
+        self.assertIn('content="noindex"', removed)
+        self.assertNotIn(page + "#classic", removed)
+        self.assertNotIn("<time", app.render_cards([card()], "programs"))
+        self.assertIn("<time", app.render_cards([card()], "offers"))
+
+    def test_rest_publish_changes_only_selected_page_and_keeps_other_sitemap_urls(self):
+        github = FakeGitHub()
+        application = app.Application(self.store, "", github=github)
+        self.store.save([card()], 0)
+        application.publish(1)
+        before = github.files.copy()
+        media = self.store.upload("offer.png", base64.b64encode(PNG).decode())
+        self.store.save([card(media=[media])], 0, "offers")
+        result = application.publish(1, "offers")
+        changed = {path for path in github.files if before.get(path) != github.files[path]}
+        filename = media["url"].rsplit("/", 1)[1]
+        self.assertEqual(changed, {"offers.html", "content/offers.json", "sitemap.xml", "assets/offers/" + filename})
+        self.assertIn(NEWS_URL, github.files["sitemap.xml"].decode())
+        self.assertIn(NEWS_URL.replace("news.html", "offers.html"), github.files["sitemap.xml"].decode())
+        self.assertEqual(self.store.publish_status("offers")["commit"], result["commit"])
+        repeated = application.publish(1, "offers")
+        self.assertEqual(repeated, result)
+        self.assertEqual(github.commits, 2)
+        self.store.save([], 1, "offers")
+        application.publish(2, "offers")
+        self.assertIn(NEWS_URL, github.files["sitemap.xml"].decode())
+        self.assertNotIn(NEWS_URL.replace("news.html", "offers.html"), github.files["sitemap.xml"].decode())
+
+    def test_current_service_seed_and_template_remain_renderable(self):
+        root = Path(__file__).resolve().parent.parent
+        seed = json.loads((root / "content/services.json").read_text(encoding="utf-8"))["cards"]
+        self.store.seed_section("services", seed)
+        self.assertEqual(len(self.store.draft("services")["cards"]), 7)
+        template = (root / "services.html").read_text(encoding="utf-8")
+        rendered = app.prepare_page(template, seed, "services")
+        self.assertEqual(rendered.count('class="service-card"'), 7)
+        self.assertNotIn("<time", rendered)
+
 
 class GitSSHTests(unittest.TestCase):
     def setUp(self):
@@ -335,6 +480,8 @@ class GitSSHTests(unittest.TestCase):
         (self.repository / "news.html").write_text(TEMPLATE, encoding="utf-8")
         (self.repository / "sitemap.xml").write_text(SITEMAP, encoding="utf-8")
         (self.repository / "keep.txt").write_text("preserve", encoding="utf-8")
+        for section in ("offers", "services", "programs"):
+            (self.repository / (section + ".html")).write_text(section_template(section), encoding="utf-8")
         self.git("add", ".")
         self.git("commit", "-m", "Initial site")
         self.git("push", "origin", "main")
@@ -398,6 +545,20 @@ class GitSSHTests(unittest.TestCase):
         recovered = application.publish(1)
         self.assertEqual(recovered["commit"], previous_head)
         self.assertEqual(self.store.publish_status()["commit"], previous_head)
+
+    def test_ssh_section_commit_is_isolated_and_preserves_news(self):
+        application = app.Application(self.store, "", github=app.GitSSH(self.repository))
+        news = application.publish(1)
+        self.store.save([card(id="classic", duration="90 минут")], 0, "services")
+        services = application.publish(1, "services")
+        changed = self.git("--git-dir=" + str(self.remote), "diff", "--name-only", news["commit"], services["commit"]).decode().splitlines()
+        self.assertCountEqual(changed, ["services.html", "content/services.json", "sitemap.xml"])
+        published = self.git("--git-dir=" + str(self.remote), "show", services["commit"] + ":content/services.json")
+        data = json.loads(published)
+        self.assertEqual(data["section"], "services")
+        self.assertEqual(data["cards"][0]["duration"], "90 минут")
+        self.assertEqual(self.store.publish_status()["commit"], news["commit"])
+        self.assertEqual(application.publish(1, "services")["commit"], services["commit"])
 
 
 if __name__ == "__main__":
